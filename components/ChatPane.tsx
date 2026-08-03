@@ -8,6 +8,11 @@ import {
 } from "@/components/ui/chat-container";
 import { Message, MessageContent } from "@/components/ui/message";
 import {
+  Reasoning,
+  ReasoningTrigger,
+  ReasoningContent,
+} from "@/components/ui/reasoning";
+import {
   PromptInput,
   PromptInputTextarea,
   PromptInputActions,
@@ -16,7 +21,7 @@ import {
 import { TypingLoader } from "@/components/ui/loader";
 import { ArrowUp } from "lucide-react";
 
-type Msg = { role: "user" | "assistant"; content: string };
+type Msg = { role: "user" | "assistant"; content: string; reasoning?: string };
 
 export default function ChatPane() {
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -27,9 +32,16 @@ export default function ChatPane() {
     const text = input.trim();
     if (!text || loading) return;
     const next: Msg[] = [...messages, { role: "user", content: text }];
-    setMessages([...next, { role: "assistant", content: "" }]);
+    setMessages([...next, { role: "assistant", content: "", reasoning: "" }]);
     setInput("");
     setLoading(true);
+
+    const patchLast = (fn: (m: Msg) => Msg) =>
+      setMessages((m) => {
+        const copy = [...m];
+        copy[copy.length - 1] = fn(copy[copy.length - 1]);
+        return copy;
+      });
 
     try {
       const res = await fetch("/api/chat", {
@@ -53,21 +65,12 @@ export default function ChatPane() {
           if (!data || data === "[DONE]") continue;
           try {
             const j = JSON.parse(data);
-            if (j.delta) {
-              setMessages((m) => {
-                const copy = [...m];
-                copy[copy.length - 1] = {
-                  role: "assistant",
-                  content: copy[copy.length - 1].content + j.delta,
-                };
-                return copy;
-              });
+            if (j.reasoning) {
+              patchLast((m) => ({ ...m, reasoning: (m.reasoning ?? "") + j.reasoning }));
+            } else if (j.delta) {
+              patchLast((m) => ({ ...m, content: m.content + j.delta }));
             } else if (j.error) {
-              setMessages((m) => {
-                const copy = [...m];
-                copy[copy.length - 1] = { role: "assistant", content: `⚠️ ${j.error}` };
-                return copy;
-              });
+              patchLast((m) => ({ ...m, content: `⚠️ ${j.error}` }));
             }
           } catch {
             /* keepalive */
@@ -75,11 +78,7 @@ export default function ChatPane() {
         }
       }
     } catch (e) {
-      setMessages((m) => {
-        const copy = [...m];
-        copy[copy.length - 1] = { role: "assistant", content: `⚠️ ${String(e)}` };
-        return copy;
-      });
+      patchLast((m) => ({ ...m, content: `⚠️ ${String(e)}` }));
     } finally {
       setLoading(false);
     }
@@ -90,28 +89,55 @@ export default function ChatPane() {
       <ChatContainerRoot className="relative flex-1 overflow-y-auto px-4 py-6">
         <ChatContainerContent className="mx-auto flex w-full max-w-3xl flex-col gap-6">
           {messages.length === 0 && (
-            <div className="text-muted-foreground mx-auto mt-24 max-w-md text-center text-sm">
-              Ask your brain anything. Answers stream in, grounded on what you&apos;ve stored.
+            <div className="mx-auto mt-24 max-w-md text-center">
+              <p className="eyebrow mb-3">ask your brain</p>
+              <p className="text-ink-soft text-lg leading-relaxed">
+                Answers stream in, grounded on what you&apos;ve stored — with the
+                thinking shown as it works.
+              </p>
             </div>
           )}
-          {messages.map((m, i) =>
-            m.role === "user" ? (
-              <Message key={i} className="justify-end">
-                <MessageContent className="bg-primary text-primary-foreground max-w-[80%]">
-                  {m.content}
-                </MessageContent>
-              </Message>
-            ) : (
-              <Message key={i} className="justify-start">
+          {messages.map((m, i) => {
+            const isLast = i === messages.length - 1;
+            if (m.role === "user") {
+              return (
+                <Message key={i} className="justify-end">
+                  <MessageContent className="bg-primary text-primary-foreground max-w-[80%] rounded-2xl">
+                    {m.content}
+                  </MessageContent>
+                </Message>
+              );
+            }
+            // assistant
+            const thinking = loading && isLast && m.content === "";
+            return (
+              <Message key={i} className="w-full max-w-[85%] flex-col items-start gap-2">
+                {m.reasoning ? (
+                  <Reasoning
+                    isStreaming={thinking}
+                    className="border-border bg-card w-full rounded-xl border border-l-2 border-l-[var(--gold)] px-3 py-2"
+                  >
+                    <ReasoningTrigger className="eyebrow !text-[var(--gold)]">
+                      {thinking ? "Thinking…" : "Thought process"}
+                    </ReasoningTrigger>
+                    <ReasoningContent
+                      markdown
+                      className="mt-2"
+                      contentClassName="text-ink-soft text-sm leading-relaxed"
+                    >
+                      {m.reasoning}
+                    </ReasoningContent>
+                  </Reasoning>
+                ) : null}
                 <MessageContent
                   markdown
-                  className="bg-secondary text-foreground max-w-[80%]"
+                  className="bg-secondary text-foreground w-full rounded-2xl rounded-tl-sm border-l-2 border-l-[var(--claret)]"
                 >
-                  {m.content || (loading && i === messages.length - 1 ? "…" : "")}
+                  {m.content || (thinking ? "…" : "")}
                 </MessageContent>
               </Message>
-            )
-          )}
+            );
+          })}
           <ChatContainerScrollAnchor />
         </ChatContainerContent>
       </ChatContainerRoot>
