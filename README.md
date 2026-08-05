@@ -19,7 +19,7 @@ Set these (locally in `.env.local`, on Vercel as Project Settings -> Environment
 | Var | What |
 |-----|------|
 | `BRAIN_BASE` | `https://oqduxjquzbvetkcllymd.supabase.co/functions/v1` |
-| `BRAIN_INGEST_TOKEN` | the brain ingest token (server-side only, never `NEXT_PUBLIC_`) |
+|  `BRAIN_INGEST_TOKEN` | the vchat **scoped grant key** (server-side only, never `NEXT_PUBLIC_`) — minted in the brain’s grants table (S7); the old shared ingest token still works until S8 re-keys |
 
 ## Run locally
 ```bash
