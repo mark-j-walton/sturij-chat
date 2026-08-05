@@ -65,7 +65,13 @@ export default function DocsPane() {
       body: JSON.stringify({ op: "save", path: sel.path, title: sel.title, category: sel.category, content }),
     });
     const j = await r.json();
-    setStatus(j.ok ? `Saved ✓ (${j.action})` : `⚠️ ${j.error || "failed"}`);
+    setStatus(
+      j.ok
+        ? j.searchable
+          ? `Saved ✓ · searchable (${j.chunks} chunks)`
+          : `Saved ✓ (${j.action})`
+        : `⚠️ ${j.error || "failed"}`
+    );
     setDirty(false);
   }
 
