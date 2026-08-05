@@ -1,7 +1,7 @@
 "use client";
 
 import "@mdxeditor/editor/style.css";
-import type { ForwardedRef } from "react";
+import { useEffect, useState, type ForwardedRef } from "react";
 import {
   MDXEditor,
   type MDXEditorMethods,
@@ -29,15 +29,31 @@ import {
   DiffSourceToggleWrapper,
 } from "@mdxeditor/editor";
 
+// Follow the app theme: MDXEditor ships a `.dark-theme` class for dark mode.
+function useIsDark() {
+  const [dark, setDark] = useState(false);
+  useEffect(() => {
+    const el = document.documentElement;
+    const sync = () => setDark(el.classList.contains("dark"));
+    sync();
+    const obs = new MutationObserver(sync);
+    obs.observe(el, { attributes: true, attributeFilter: ["class"] });
+    return () => obs.disconnect();
+  }, []);
+  return dark;
+}
+
 // The real editor. Loaded client-side only (MDXEditor touches the DOM on import).
 export default function InitializedMDXEditor({
   editorRef,
   ...props
 }: { editorRef?: ForwardedRef<MDXEditorMethods> | null } & MDXEditorProps) {
+  const dark = useIsDark();
   return (
     <MDXEditor
       ref={editorRef ?? undefined}
-      contentEditableClassName="prose max-w-none min-h-[60vh] px-2"
+      className={dark ? "dark-theme" : undefined}
+      contentEditableClassName="prose dark:prose-invert max-w-none min-h-[60vh] px-2"
       plugins={[
         headingsPlugin(),
         listsPlugin(),
