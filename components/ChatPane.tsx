@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ChatContainerRoot,
   ChatContainerContent,
@@ -18,11 +18,27 @@ import {
   PromptInputActions,
   PromptInputAction,
 } from "@/components/ui/prompt-input";
-import { TypingLoader } from "@/components/ui/loader";
-import { ArrowUp, Plus, History } from "lucide-react";
+import {
+  ArrowUp,
+  Plus,
+  History,
+  Square,
+  Copy,
+  RotateCcw,
+  Pencil,
+  Flag,
+  Download,
+  X,
+} from "lucide-react";
 
-type Msg = { role: "user" | "assistant"; content: string; reasoning?: string };
+type Msg = {
+  role: "user" | "assistant";
+  content: string;
+  reasoning?: string;
+  interrupted?: boolean; // V1 stop & amend: reply was stopped mid-stream, kept and marked
+};
 type Session = { id: string; title: string; updated_at: string };
+type Checkpoint = { index: number; at: Date };
 
 export default function ChatPane() {
   const [messages, setMessages] = useState<Msg[]>([]);
@@ -31,6 +47,21 @@ export default function ChatPane() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [railOpen, setRailOpen] = useState(false);
+  const [queue, setQueue] = useState<string[]>([]);
+  const [checkpoint, setCheckpoint] = useState<Checkpoint | null>(null);
+
+  // Refs mirror state that streaming callbacks and queue-drain need fresh,
+  // because those run inside closures captured before the state settled.
+  const messagesRef = useRef<Msg[]>([]);
+  const queueRef = useRef<string[]>([]);
+  const busyRef = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+  useEffect(() => {
+    queueRef.current = queue;
+  }, [queue]);
 
   async function refreshSessions() {
     try {
@@ -67,6 +98,7 @@ export default function ChatPane() {
         );
         setSessionId(id);
         setRailOpen(false);
+        setCheckpoint(null);
       }
     } catch {
       /* leave current thread untouched */
@@ -77,14 +109,14 @@ export default function ChatPane() {
     setMessages([]);
     setSessionId(null);
     setRailOpen(false);
+    setQueue([]);
+    setCheckpoint(null);
   }
 
-  async function send() {
-    const text = input.trim();
-    if (!text || loading) return;
-    const next: Msg[] = [...messages, { role: "user", content: text }];
+  // Core streaming turn: `next` already ends with the user message to answer.
+  async function run(next: Msg[]) {
+    busyRef.current = true;
     setMessages([...next, { role: "assistant", content: "", reasoning: "" }]);
-    setInput("");
     setLoading(true);
 
     const patchLast = (fn: (m: Msg) => Msg) =>
@@ -94,11 +126,14 @@ export default function ChatPane() {
         return copy;
       });
 
+    const ac = new AbortController();
+    abortRef.current = ac;
     try {
       const res = await fetch("/api/chat", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ messages: next, session_id: sessionId }),
+        signal: ac.signal,
       });
       const reader = res.body!.getReader();
       const dec = new TextDecoder();
@@ -131,12 +166,109 @@ export default function ChatPane() {
         }
       }
     } catch (e) {
-      patchLast((m) => ({ ...m, content: `⚠️ ${String(e)}` }));
+      if (ac.signal.aborted) {
+        // V1 stop & amend: keep the partial, mark it; the next send carries both.
+        patchLast((m) => ({ ...m, interrupted: true }));
+      } else {
+        patchLast((m) => ({ ...m, content: `⚠️ ${String(e)}` }));
+      }
     } finally {
+      abortRef.current = null;
+      busyRef.current = false;
       setLoading(false);
       refreshSessions();
+      // V1 message queuing: drain in order once the stream ends.
+      const nxt = queueRef.current[0];
+      if (nxt !== undefined) {
+        setQueue((q) => q.slice(1));
+        setTimeout(() => send(nxt), 0);
+      }
     }
   }
+
+  function send(textArg?: string) {
+    const text = (textArg ?? input).trim();
+    if (!text) return;
+    if (busyRef.current) {
+      // V1 message queuing: type while it answers; queued turns send in order.
+      setQueue((q) => [...q, text]);
+      setInput("");
+      return;
+    }
+    setInput("");
+    run([...messagesRef.current, { role: "user", content: text }]);
+  }
+
+  function stop() {
+    abortRef.current?.abort();
+  }
+
+  // V1 message actions -------------------------------------------------------
+  function copyMsg(i: number) {
+    try {
+      navigator.clipboard.writeText(messagesRef.current[i]?.content ?? "");
+    } catch {
+      /* clipboard is best-effort */
+    }
+  }
+  function retry(i: number) {
+    // Re-run the turn that produced assistant message i: history up to (and
+    // including) the user message just before it.
+    if (busyRef.current) return;
+    const base = messagesRef.current.slice(0, i);
+    if (!base.length || base[base.length - 1].role !== "user") return;
+    setCheckpoint((c) => (c && c.index > i ? null : c));
+    run(base);
+  }
+  function editResend(i: number) {
+    // Load the user message into the input and rewind history to before it.
+    if (busyRef.current) return;
+    const m = messagesRef.current[i];
+    if (!m || m.role !== "user") return;
+    setInput(m.content);
+    setMessages(messagesRef.current.slice(0, i));
+    setCheckpoint((c) => (c && c.index > i ? null : c));
+  }
+
+  // V1 checkpoint → download -------------------------------------------------
+  function stamp(d: Date) {
+    return d.toLocaleString(undefined, {
+      day: "numeric",
+      month: "short",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+  function downloadCheckpoint() {
+    if (!checkpoint) return;
+    const now = new Date();
+    const since = messagesRef.current.slice(checkpoint.index);
+    const lines = [
+      "# vchat — checkpoint download",
+      "",
+      `Checkpointed ${stamp(checkpoint.at)} · downloaded ${stamp(now)} · ${since.length} message${since.length === 1 ? "" : "s"}`,
+      "",
+      "---",
+      "",
+      ...since.flatMap((m) => [
+        m.role === "user" ? "**You:**" : `**vchat:**${m.interrupted ? " *(stopped early)*" : ""}`,
+        "",
+        m.content,
+        "",
+      ]),
+    ];
+    const blob = new Blob([lines.join("\n")], { type: "text/markdown" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const p = (n: number) => String(n).padStart(2, "0");
+    a.href = url;
+    a.download = `vchat-${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}-${p(now.getHours())}${p(now.getMinutes())}.md`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  const actionBtn =
+    "hover:bg-secondary text-ink-soft hover:text-foreground flex h-6 w-6 items-center justify-center rounded";
 
   const rail = (
     <div className="border-border flex h-full w-64 flex-col border-r">
@@ -180,14 +312,45 @@ export default function ChatPane() {
         <div className="bg-background absolute inset-0 z-20 md:hidden">{rail}</div>
       )}
       <div className="flex h-full min-w-0 flex-1 flex-col">
-        <div className="flex items-center gap-2 px-4 pt-2 md:hidden">
+        <div className="mx-auto flex w-full max-w-3xl items-center gap-2 px-4 pt-2">
           <button
             onClick={() => setRailOpen((v) => !v)}
-            className="hover:bg-secondary flex h-8 w-8 items-center justify-center rounded-md"
+            className="hover:bg-secondary flex h-8 w-8 items-center justify-center rounded-md md:hidden"
             aria-label="Conversation history"
           >
             <History className="h-4 w-4" />
           </button>
+          <div className="flex-1" />
+          {/* V1 checkpoint → download: stamped marker, then Download + Cancel */}
+          {checkpoint ? (
+            <div className="border-border bg-card flex items-center gap-1 rounded-full border px-2 py-1 text-xs">
+              <Flag className="h-3 w-3 text-[var(--gold)]" />
+              <span className="text-ink-soft">{stamp(checkpoint.at)}</span>
+              <button
+                onClick={downloadCheckpoint}
+                className="hover:bg-secondary ml-1 flex items-center gap-1 rounded-full px-2 py-0.5 font-medium"
+                title="Download the chat from this checkpoint as Markdown"
+              >
+                <Download className="h-3 w-3" /> Download
+              </button>
+              <button
+                onClick={() => setCheckpoint(null)}
+                className="hover:bg-secondary flex h-5 w-5 items-center justify-center rounded-full"
+                aria-label="Cancel checkpoint"
+                title="Cancel checkpoint"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ) : (
+            <button
+              onClick={() => setCheckpoint({ index: messages.length, at: new Date() })}
+              className="text-ink-soft hover:bg-secondary hover:text-foreground flex items-center gap-1 rounded-full px-2 py-1 text-xs"
+              title="Mark this point — download everything after it as Markdown"
+            >
+              <Flag className="h-3 w-3" /> Checkpoint
+            </button>
+          )}
         </div>
         <ChatContainerRoot className="relative flex-1 overflow-y-auto px-4 py-6">
           <ChatContainerContent className="mx-auto flex w-full max-w-3xl flex-col gap-6">
@@ -204,16 +367,28 @@ export default function ChatPane() {
               const isLast = i === messages.length - 1;
               if (m.role === "user") {
                 return (
-                  <Message key={i} className="justify-end">
+                  <Message key={i} className="group flex-col items-end gap-1">
                     <MessageContent className="bg-primary text-primary-foreground max-w-[80%] rounded-2xl">
                       {m.content}
                     </MessageContent>
+                    <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                      <button onClick={() => copyMsg(i)} className={actionBtn} title="Copy">
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        onClick={() => editResend(i)}
+                        className={actionBtn}
+                        title="Edit and resend — rewinds the chat to this point"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
                   </Message>
                 );
               }
               const thinking = loading && isLast && m.content === "";
               return (
-                <Message key={i} className="w-full max-w-[85%] flex-col items-start gap-2">
+                <Message key={i} className="group w-full max-w-[85%] flex-col items-start gap-2">
                   {m.reasoning ? (
                     <Reasoning
                       isStreaming={thinking}
@@ -237,6 +412,25 @@ export default function ChatPane() {
                   >
                     {m.content || (thinking ? "…" : "")}
                   </MessageContent>
+                  {m.interrupted && (
+                    <p className="text-ink-soft text-xs italic">
+                      Stopped here — add what you missed and send; both stay in context.
+                    </p>
+                  )}
+                  {!loading && (
+                    <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                      <button onClick={() => copyMsg(i)} className={actionBtn} title="Copy">
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        onClick={() => retry(i)}
+                        className={actionBtn}
+                        title="Retry — regenerate this answer"
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )}
                 </Message>
               );
             })}
@@ -245,15 +439,59 @@ export default function ChatPane() {
         </ChatContainerRoot>
 
         <div className="mx-auto w-full max-w-3xl px-4 pb-4">
-          <PromptInput value={input} onValueChange={setInput} onSubmit={send} isLoading={loading}>
-            <PromptInputTextarea placeholder="Message your brain…" />
+          {/* V1 message queuing: what's waiting its turn */}
+          {queue.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {queue.map((q, i) => (
+                <span
+                  key={i}
+                  className="border-border bg-card text-ink-soft flex max-w-[16rem] items-center gap-1 rounded-full border px-2.5 py-1 text-xs"
+                  title={q}
+                >
+                  <span className="truncate">{q}</span>
+                  <button
+                    onClick={() => setQueue((qs) => qs.filter((_, j) => j !== i))}
+                    className="hover:text-foreground"
+                    aria-label="Remove from queue"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+          <PromptInput value={input} onValueChange={setInput} onSubmit={() => send()} isLoading={loading}>
+            <PromptInputTextarea
+              placeholder={loading ? "Type the next message — it sends when this one finishes…" : "Message your brain…"}
+            />
             <PromptInputActions className="justify-end pt-2">
               {loading ? (
-                <TypingLoader />
+                <>
+                  {input.trim() && (
+                    <PromptInputAction tooltip="Queue — sends when the current answer finishes">
+                      <button
+                        onClick={() => send()}
+                        className="bg-secondary text-foreground flex h-9 w-9 items-center justify-center rounded-full"
+                        aria-label="Queue message"
+                      >
+                        <ArrowUp className="h-5 w-5" />
+                      </button>
+                    </PromptInputAction>
+                  )}
+                  <PromptInputAction tooltip="Stop — keeps what's written; you can add to it and continue">
+                    <button
+                      onClick={stop}
+                      className="bg-primary text-primary-foreground flex h-9 w-9 items-center justify-center rounded-full"
+                      aria-label="Stop"
+                    >
+                      <Square className="h-4 w-4" />
+                    </button>
+                  </PromptInputAction>
+                </>
               ) : (
                 <PromptInputAction tooltip="Send">
                   <button
-                    onClick={send}
+                    onClick={() => send()}
                     disabled={!input.trim()}
                     className="bg-primary text-primary-foreground flex h-9 w-9 items-center justify-center rounded-full disabled:opacity-40"
                     aria-label="Send"
