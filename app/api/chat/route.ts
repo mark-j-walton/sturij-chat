@@ -26,6 +26,21 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // V1b: artifact — a standalone HTML deliverable generated from the conversation. JSON, not SSE.
+  if (b.op === "artifact") {
+    const r = await brainFetch("chat", {
+      op: "artifact",
+      messages: b.messages ?? [],
+      instruction: b.instruction,
+      session_id: b.session_id ?? null,
+      user: user.email,
+    });
+    return new Response(await r.text(), {
+      status: r.status,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
   const r = await brainFetch("chat", {
     messages: b.messages ?? [],
     session_id: b.session_id ?? null,

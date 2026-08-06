@@ -29,7 +29,16 @@ import {
   Flag,
   Download,
   X,
+  Sparkles,
 } from "lucide-react";
+
+// V1b prompt suggestions — shown on the empty state; click to send.
+const SUGGESTIONS = [
+  "What did we decide about the product?",
+  "Summarise the most recent meetings",
+  "What's in the Document Library?",
+  "Write up today's progress as a short report",
+];
 
 type Msg = {
   role: "user" | "assistant";
@@ -49,6 +58,7 @@ export default function ChatPane() {
   const [railOpen, setRailOpen] = useState(false);
   const [queue, setQueue] = useState<string[]>([]);
   const [checkpoint, setCheckpoint] = useState<Checkpoint | null>(null);
+  const [artifactBusy, setArtifactBusy] = useState(false);
 
   // Refs mirror state that streaming callbacks and queue-drain need fresh,
   // because those run inside closures captured before the state settled.
@@ -201,6 +211,38 @@ export default function ChatPane() {
 
   function stop() {
     abortRef.current?.abort();
+  }
+
+  // V1b artifacts: fire a standalone page from the conversation, styled by the
+  // design contract. The tab opens synchronously (popup-blocker safe), then the
+  // generated document is written into it.
+  async function fireArtifact() {
+    if (artifactBusy || busyRef.current || !messagesRef.current.length) return;
+    const instruction = input.trim() || undefined;
+    const tab = window.open("", "_blank");
+    if (tab) tab.document.write("<title>Making your artifact…</title><p style='font-family:sans-serif;padding:2rem'>Making your artifact…</p>");
+    setArtifactBusy(true);
+    if (instruction) setInput("");
+    try {
+      const r = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ op: "artifact", messages: messagesRef.current, instruction, session_id: sessionId }),
+      });
+      const j = await r.json();
+      if (j && j.ok && j.html) {
+        if (tab) { tab.document.open(); tab.document.write(j.html); tab.document.close(); }
+        setMessages((m) => [...m, { role: "assistant", content: `✨ Artifact created: **${j.title}** — it opened in a new tab.` }]);
+      } else {
+        tab?.close();
+        setMessages((m) => [...m, { role: "assistant", content: `⚠️ Artifact failed: ${j?.error ?? r.statusText}` }]);
+      }
+    } catch (e) {
+      tab?.close();
+      setMessages((m) => [...m, { role: "assistant", content: `⚠️ Artifact failed: ${String(e)}` }]);
+    } finally {
+      setArtifactBusy(false);
+    }
   }
 
   // V1 message actions -------------------------------------------------------
@@ -361,6 +403,17 @@ export default function ChatPane() {
                   Answers stream in, grounded on what you&apos;ve stored — with the
                   thinking shown as it works, and every conversation kept.
                 </p>
+                <div className="mt-6 flex flex-wrap justify-center gap-2">
+                  {SUGGESTIONS.map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => send(s)}
+                      className="border-border bg-card text-ink-soft hover:bg-secondary hover:text-foreground rounded-full border px-3 py-1.5 text-sm"
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
             {messages.map((m, i) => {
@@ -489,16 +542,30 @@ export default function ChatPane() {
                   </PromptInputAction>
                 </>
               ) : (
-                <PromptInputAction tooltip="Send">
-                  <button
-                    onClick={() => send()}
-                    disabled={!input.trim()}
-                    className="bg-primary text-primary-foreground flex h-9 w-9 items-center justify-center rounded-full disabled:opacity-40"
-                    aria-label="Send"
-                  >
-                    <ArrowUp className="h-5 w-5" />
-                  </button>
-                </PromptInputAction>
+                <>
+                  {messages.length > 0 && (
+                    <PromptInputAction tooltip={artifactBusy ? "Making your artifact…" : "Artifact — turn this conversation into a finished page (type an instruction first to steer it)"}>
+                      <button
+                        onClick={fireArtifact}
+                        disabled={artifactBusy}
+                        className="bg-secondary text-foreground flex h-9 w-9 items-center justify-center rounded-full disabled:opacity-40"
+                        aria-label="Create artifact"
+                      >
+                        <Sparkles className={`h-5 w-5 ${artifactBusy ? "animate-pulse" : ""}`} />
+                      </button>
+                    </PromptInputAction>
+                  )}
+                  <PromptInputAction tooltip="Send">
+                    <button
+                      onClick={() => send()}
+                      disabled={!input.trim()}
+                      className="bg-primary text-primary-foreground flex h-9 w-9 items-center justify-center rounded-full disabled:opacity-40"
+                      aria-label="Send"
+                    >
+                      <ArrowUp className="h-5 w-5" />
+                    </button>
+                  </PromptInputAction>
+                </>
               )}
             </PromptInputActions>
           </PromptInput>
