@@ -31,6 +31,16 @@ export default function Home() {
             ))}
           </nav>
           <ThemeToggle />
+          <button
+            onClick={async () => {
+              await fetch("/logout", { method: "POST" });
+              location.href = "/login";
+            }}
+            className="text-ink-soft hover:text-foreground text-sm"
+            title="Sign out"
+          >
+            sign out
+          </button>
         </div>
       </header>
       <main className="min-h-0 flex-1">{tab === "chat" ? <ChatPane /> : <DocsPane />}</main>
