@@ -3,10 +3,11 @@
 import { useState } from "react";
 import ChatPane from "@/components/ChatPane";
 import DocsPane from "@/components/DocsPane";
+import PulsePane from "@/components/PulsePane";
 import ThemeToggle from "@/components/ThemeToggle";
 
 export default function Home() {
-  const [tab, setTab] = useState<"chat" | "docs">("chat");
+  const [tab, setTab] = useState<"chat" | "docs" | "pulse">("chat");
   return (
     <div className="flex h-screen flex-col">
       <header className="border-border flex items-center justify-between border-b px-5 py-3">
@@ -16,7 +17,7 @@ export default function Home() {
         </div>
         <div className="flex items-center gap-3">
           <nav className="border-border flex gap-1 rounded-full border p-1 text-sm">
-            {(["chat", "docs"] as const).map((t) => (
+            {(["chat", "docs", "pulse"] as const).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -43,7 +44,9 @@ export default function Home() {
           </button>
         </div>
       </header>
-      <main className="min-h-0 flex-1">{tab === "chat" ? <ChatPane /> : <DocsPane />}</main>
+      <main className="min-h-0 flex-1">
+        {tab === "chat" ? <ChatPane /> : tab === "docs" ? <DocsPane /> : <PulsePane />}
+      </main>
     </div>
   );
 }
